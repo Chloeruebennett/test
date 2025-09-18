@@ -1,74 +1,110 @@
-// Это workflow для генерации и обработки тестовых данных, связанных с транзакциями или клиентами. Весь поток делится на несколько основных этапов:
-// Генерация данных (Code node) — создание массива с 8-ю записями, каждая из которых содержит поля: email, сумма, валюта, статус, дополнительные большие поля (для тестов), дата и рандомное значение.
-// Задержка (Wait) — пауза 20 секунд.
-// Обработка данных — сортировка, фильтрация, нормализация значений и подготовка к дальнейшей обработке.
-// Проверка данных — фильтрация по email, валюта, сумма и прочие условия.
-// Форматирование — приведение значений к нужным форматам.
-// Запись в файлы (spreadsheetFile) — подготовка файлов для дальнейших экспортах или хранения.
-// HTTP-запросы — вызовы API с параметрами, основанными на данных.
+#!/bin/bash
 
+set -e
 
+IMAGE_NAME="dashy_custom"
+IMAGE_TAR_FILE="dashy_image.tar"
+DOCKERFILE_PATH="./Dockerfile"
+COMPOSE_FILE="./docker-compose.yml"
+REPO_URL="https://github.com/Lissy93/dashy.git"
+CONFIG_FILE="./dashboard-config.json"
+CONTAINER_CONFIG_PATH="/app/config/dashboard-config.json"
+
+echo "Проверка запущенности Docker..."
+if ! docker info > /dev/null 2>&1; then
+    echo "Ошибка: Docker не запущен или недоступен."
+    exit 1
+fi
+echo "Docker запущен."
+
+echo "Проверка доступа в интернет..."
+if ! ping -c 2 google.com > /dev/null 2>&1; then
+    echo "Ошибка: Нет доступа к интернету."
+    exit 1
+fi
+
+echo "Проверка доступности репозитория..."
+if ! git ls-remote "$REPO_URL" > /dev/null 2>&1; then
+    echo "Ошибка: Не удается получить доступ к репозиторию $REPO_URL."
+    exit 1
+fi
+echo "Доступ к репозиторию есть."
+
+# Создаём или редактируем конфигурационный файл дашборда
+echo "Создание файла конфигурации дашборда..."
+cat > "$CONFIG_FILE" <<EOF
 {
-  "nodes": [
-    {
-      "parameters": {
-        "jsCode": "const statuses = [...];\nconst currencies = [...];\nconst records = [];\nfor (let i = 0; i < 8; i++) {\n  // генерация данных\n}\nreturn records;"
-      },
-      "name": "Generate Data",
-      "type": "n8n-nodes-base.code"
-    },
-    {
-      "parameters": { "amount": 20, "unit": "seconds" },
-      "name": "Pause",
-      "type": "n8n-nodes-base.wait"
-    },
-    {
-      "parameters": {
-        "jsCode": "const itemsCopy = [...items];\n// Перемешивание\nitemsCopy.sort(() => Math.random() - 0.5);\n// Сортировка по email\nitemsCopy.sort((a, b) => (a.json.customer_email || '').localeCompare(b.json.customer_email || ''));\n// Фильтр валидных email\nreturn itemsCopy.filter(item => /^[a-zA-Z0-9.!#$%&'*+\\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/.test(item.json.customer_email || ''));"
-      },
-      "name": "Filter Valid Emails",
-      "type": "n8n-nodes-base.code"
-    },
-    {
-      "parameters": {
-        "values": {
-          "string": [
-            { "name": "customer_email", "value": "={{$json.customer_email ? $json.customer_email.toLowerCase().trim() : ''}}" },
-            { "name": "currency", "value": "={{($json.currency || '').toUpperCase().trim()}}" },
-            { "name": "status", "value": "={{($json.status || '').trim()}}" }
-          ],
-          "number": [
-            { "name": "amount", "value": "={{Number($json.amount) || 0}}" }
-          ]
-        }
-      },
-      "name": "Normalize Data",
-      "type": "n8n-nodes-base.set"
-    },
-    {
-      "parameters": {
-        "values": {
-          "string": [
-            { "name": "currency_final", "value": "={{$json.currency === 'RUR' ? 'RUB' : $json.currency}}" }
-          ]
-        }
-      },
-      "name": "Set Final Currency",
-      "type": "n8n-nodes-base.set"
-    },
-    {
-      "parameters": {
-        "operation": "toFile"
-      },
-      "name": "Export to File",
-      "type": "n8n-nodes-base.spreadsheetFile"
-    },
-    {
-      "parameters": {
-        "url": "https://httpbin.org/get?email={{$json.customer_email}}&random={{$json.random_seed}}"
-      },
-      "name": "API Call",
-      "type": "n8n-nodes-base.httpRequest"
-    }
-  ]
+  "dashboard": {
+    "title": "Мой кастомный дашборд",
+    "widgets": [
+      { "type": "graph", "title": "CPU Usage" },
+      { "type": "table", "title": "Recent Logs" }
+    ]
+  }
 }
+EOF
+
+# Создание Dockerfile с монтированием конфигурационного файла
+echo "Создание Dockerfile..."
+cat > "$DOCKERFILE_PATH" <<EOF
+FROM node:alpine
+WORKDIR /app
+COPY . /app
+RUN apk add --no-cache git
+RUN git clone --depth 1 "$REPO_URL" /app
+RUN npm install
+RUN npm run build
+EXPOSE 8080
+# Запуск приложения с указанием конфигурационного файла
+CMD ["npm", "start", "--", "--config", "$CONTAINER_CONFIG_PATH"]
+EOF
+
+# Построение образа
+echo "Сборка Docker-образ..."
+docker build -t "$IMAGE_NAME" -f "$DOCKERFILE_PATH" .
+
+# Экспорт образа
+echo "Экспорт образа..."
+docker save -o "$IMAGE_TAR_FILE" "$IMAGE_NAME"
+
+# Очистка Docker
+echo "Очищение Docker..."
+docker container prune -f
+docker image prune -f --all
+docker system prune -f --all
+
+# Импорт образа
+echo "Импорт образа..."
+docker load -i "$IMAGE_TAR_FILE"
+
+# Создание docker-compose с монтированием конфигурации
+echo "Создание docker-compose.yml..."
+cat > "$COMPOSE_FILE" <<EOF
+version: '3'
+services:
+  dashy:
+    image: "$IMAGE_NAME"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - "$(pwd)/dashboard-config.json:$CONTAINER_CONFIG_PATH:ro"
+    stdin_open: true
+    tty: true
+EOF
+
+# Запуск контейнера
+echo "Запуск приложения..."
+docker-compose -f "$COMPOSE_FILE" up -d
+
+# Проверка
+echo "Проверка доступности приложения..."
+sleep 5
+if curl -s --fail http://localhost:8080 > /dev/null; then
+    echo "Приложение успешно запущено и использует локальную конфигурацию."
+else
+    echo "Ошибка: приложение недоступно."
+    docker-compose -f "$COMPOSE_FILE" down
+    exit 1
+fi
+
+echo "Все операции завершены успешно."
